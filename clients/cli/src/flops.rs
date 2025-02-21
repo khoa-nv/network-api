@@ -27,6 +27,6 @@ pub fn measure_flops() -> f32 {
 
     let duration = start.elapsed();
 
-    let flops = 9999999999;
+    let flops = 2147483647;
     flops as f32
 }
