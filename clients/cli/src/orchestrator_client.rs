@@ -14,7 +14,7 @@ use std::collections::VecDeque;
 use futures;
 
 // Define our own Result type
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
 
 // Move NoTaskBackoff outside impl block
 struct NoTaskBackoff {
@@ -172,7 +172,7 @@ impl OrchestratorClient {
                     }
 
                     let jitter: i32 = rand::thread_rng().gen_range(-100..100);
-                    let delay = Duration::from_millis(delay_ms.saturating_add((jitter.abs() as u64)));
+                    let delay = Duration::from_millis(delay_ms.saturating_add(jitter.abs() as u64));
                     
                     println!("Request failed, retrying in {} ms: {}", delay.as_millis(), e);
                     sleep(delay).await;
@@ -199,17 +199,19 @@ impl OrchestratorClient {
             let request_count = remaining.min(5);
             let mut futures = Vec::with_capacity(request_count);
 
-            // Create all requests first and store them
-            let requests: Vec<GetProofTaskRequest> = (0..request_count)
-                .map(|_| GetProofTaskRequest {
+            // Create and process requests one at a time to avoid lifetime issues
+            for _ in 0..request_count {
+                let request = GetProofTaskRequest {
                     node_id: node_id.to_string(),
                     node_type: NodeType::CliProver as i32,
-                })
-                .collect();
-
-            // Create futures using the stored requests
-            for request in &requests {
-                futures.push(self.make_request_with_retry::<GetProofTaskRequest, GetProofTaskResponse>("/tasks", "POST", request));
+                };
+                
+                let future = self.make_request_with_retry::<GetProofTaskRequest, GetProofTaskResponse>(
+                    "/tasks", 
+                    "POST", 
+                    &request
+                );
+                futures.push(future);
             }
 
             let results = futures::future::join_all(futures).await;
@@ -334,7 +336,7 @@ impl OrchestratorClient {
                     
                     let jitter: i32 = rand::thread_rng().gen_range(-500..500);
                     let delay = Duration::from_millis(
-                        backoff.current_delay.saturating_add((jitter.abs() as u64))
+                        backoff.current_delay.saturating_add(jitter.abs() as u64)
                     );
                     
                     println!(
