@@ -16,7 +16,6 @@ mod utils;
 use clap::{Parser, Subcommand};
 use tokio::signal::ctrl_c;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 
 // Global flag for graceful shutdown
 static SHUTDOWN_FLAG: AtomicBool = AtomicBool::new(false);
@@ -99,7 +98,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Command::Start { env } => {
                 prover::start_prover(&config::Environment::from_args(env.as_ref())).await
             }
-            Command::Logout => setup::clear_node_id(),
+            Command::Logout => {
+                setup::clear_node_id().map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+            }
         };
 
         match result {
