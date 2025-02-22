@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 use std::collections::VecDeque;
 use futures;
 use std::error::Error as StdError;
+use anyhow::{Result, Error};
 
 // Move NoTaskBackoff outside impl block
 struct NoTaskBackoff {
@@ -40,7 +41,6 @@ pub struct OrchestratorClient {
     base_url: String,
     task_cache: Arc<Mutex<VecDeque<GetProofTaskResponse>>>,
     prefetch_threshold: usize,
-    // environment: config::Environment,
 }
 
 impl OrchestratorClient {
@@ -70,7 +70,6 @@ impl OrchestratorClient {
             base_url: environment.orchestrator_url(),
             task_cache: Arc::new(Mutex::new(VecDeque::with_capacity(Self::CACHE_SIZE))),
             prefetch_threshold: Self::PREFETCH_THRESHOLD,
-            // environment,
         }
     }
 
@@ -79,7 +78,7 @@ impl OrchestratorClient {
         url: &str,
         method: &str,
         request_data: &T,
-    ) -> Result<Option<U>, Box<dyn StdError + Send + Sync>>
+    ) -> Result<Option<U>>
     where
         T: Message,
         U: Message + Default,
@@ -155,7 +154,7 @@ impl OrchestratorClient {
         url: &str,
         method: &str,
         request_data: &T,
-    ) -> Result<Option<U>, Box<dyn StdError + Send + Sync>>
+    ) -> Result<Option<U>>
     where
         T: Message + Clone,
         U: Message + Default,
@@ -171,9 +170,8 @@ impl OrchestratorClient {
                         return Err(e);
                     }
 
-                    // Add jitter to prevent thundering herd
                     let jitter = rand::thread_rng().gen_range(-100..100);
-                    let delay = Duration::from_millis(delay_ms.saturating_add(jitter as u64));
+                    let delay = Duration::from_millis(delay_ms.saturating_add(jitter.unsigned_abs() as u64));
                     
                     println!("Request failed, retrying in {} ms: {}", delay.as_millis(), e);
                     sleep(delay).await;
@@ -189,7 +187,7 @@ impl OrchestratorClient {
         &self,
         node_id: &str,
         batch_size: usize,
-    ) -> Result<Vec<GetProofTaskResponse>, Box<dyn StdError + Send + Sync>> {
+    ) -> Result<Vec<GetProofTaskResponse>> {
         let mut tasks = Vec::with_capacity(batch_size);
         let mut successful_fetches = 0;
         let mut consecutive_failures = 0;
@@ -200,12 +198,17 @@ impl OrchestratorClient {
             let request_count = remaining.min(5);
             let mut futures = Vec::with_capacity(request_count);
 
-            for _ in 0..request_count {
-                let request = GetProofTaskRequest {
+            // Create all requests first and store them
+            let requests: Vec<GetProofTaskRequest> = (0..request_count)
+                .map(|_| GetProofTaskRequest {
                     node_id: node_id.to_string(),
                     node_type: NodeType::CliProver as i32,
-                };
-                futures.push(self.make_request_with_retry::<GetProofTaskRequest, GetProofTaskResponse>("/tasks", "POST", &request));
+                })
+                .collect();
+
+            // Create futures using the stored requests
+            for request in &requests {
+                futures.push(self.make_request_with_retry::<GetProofTaskRequest, GetProofTaskResponse>("/tasks", "POST", request));
             }
 
             let results = futures::future::join_all(futures).await;
@@ -282,7 +285,7 @@ impl OrchestratorClient {
     async fn fetch_single_task(
         &self,
         node_id: &str,
-    ) -> Result<Option<GetProofTaskResponse>, Box<dyn StdError + Send + Sync>> {
+    ) -> Result<Option<GetProofTaskResponse>> {
         let request = GetProofTaskRequest {
             node_id: node_id.to_string(),
             node_type: NodeType::CliProver as i32,
@@ -305,7 +308,7 @@ impl OrchestratorClient {
     pub async fn get_proof_task(
         &self,
         node_id: &str,
-    ) -> Result<GetProofTaskResponse, Box<dyn StdError + Send + Sync>> {
+    ) -> Result<GetProofTaskResponse> {
         let mut cache = self.task_cache.lock().await;
         
         if let Some(task) = cache.pop_front() {
@@ -354,7 +357,7 @@ impl OrchestratorClient {
         node_id: &str,
         proof_hash: &str,
         proof: Vec<u8>,
-    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    ) -> Result<()> {
         let (program_memory, total_memory) = get_memory_info();
         let flops = measure_flops();
 
