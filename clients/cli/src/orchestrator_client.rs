@@ -318,7 +318,7 @@ impl OrchestratorClient {
                 node_id: node_id.to_string(),
                 node_type: NodeType::CliProver as i32,
             };
-            let cancel_rx = cancel_tx.subscribe();
+            let mut cancel_rx = cancel_tx.subscribe();
             let client = self.clone();
 
             let future = async move {
