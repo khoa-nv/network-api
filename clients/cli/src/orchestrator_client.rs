@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::VecDeque;
 use futures;
+use std::error::Error as StdError;
 
 pub struct OrchestratorClient {
     client: Client,
@@ -74,7 +75,7 @@ impl OrchestratorClient {
         url: &str,
         method: &str,
         request_data: &T,
-    ) -> Result<Option<U>, Box<dyn std::error::Error>>
+    ) -> Result<Option<U>, Box<dyn StdError + Send + Sync>>
     where
         T: Message,
         U: Message + Default,
@@ -150,7 +151,7 @@ impl OrchestratorClient {
         url: &str,
         method: &str,
         request_data: &T,
-    ) -> Result<Option<U>, Box<dyn std::error::Error>>
+    ) -> Result<Option<U>, Box<dyn StdError + Send + Sync>>
     where
         T: Message + Clone,
         U: Message + Default,
@@ -184,7 +185,7 @@ impl OrchestratorClient {
         &self,
         node_id: &str,
         batch_size: usize,
-    ) -> Result<Vec<GetProofTaskResponse>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<GetProofTaskResponse>, Box<dyn StdError + Send + Sync>> {
         let mut tasks = Vec::with_capacity(batch_size);
         let mut successful_fetches = 0;
         let mut consecutive_failures = 0;
@@ -252,9 +253,19 @@ impl OrchestratorClient {
         let cache = self.task_cache.clone();
         let node_id = node_id.to_string();
         let batch_size = Self::CACHE_SIZE * 2; // Try to fetch double the cache size
+        let client = self.client.clone();
+        let base_url = self.base_url.clone();
         
         tokio::spawn(async move {
-            match self.fetch_tasks_batch(&node_id, batch_size).await {
+            // Create a new client for this spawned task
+            let spawned_client = OrchestratorClient {
+                client,
+                base_url,
+                task_cache: cache.clone(),
+                prefetch_threshold: Self::PREFETCH_THRESHOLD,
+            };
+
+            match spawned_client.fetch_tasks_batch(&node_id, batch_size).await {
                 Ok(tasks) => {
                     let mut cache = cache.lock().await;
                     for task in tasks {
@@ -271,7 +282,10 @@ impl OrchestratorClient {
         });
     }
 
-    async fn fetch_single_task(&self, node_id: &str) -> Result<Option<GetProofTaskResponse>, Box<dyn std::error::Error>> {
+    async fn fetch_single_task(
+        &self,
+        node_id: &str,
+    ) -> Result<Option<GetProofTaskResponse>, Box<dyn StdError + Send + Sync>> {
         let request = GetProofTaskRequest {
             node_id: node_id.to_string(),
             node_type: NodeType::CliProver as i32,
@@ -295,7 +309,7 @@ impl OrchestratorClient {
     pub async fn get_proof_task(
         &self,
         node_id: &str,
-    ) -> Result<GetProofTaskResponse, Box<dyn std::error::Error>> {
+    ) -> Result<GetProofTaskResponse, Box<dyn StdError + Send + Sync>> {
         // Try to get a task from cache first
         let mut cache = self.task_cache.lock().await;
         
@@ -350,7 +364,7 @@ impl OrchestratorClient {
         node_id: &str,
         proof_hash: &str,
         proof: Vec<u8>,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
         let (program_memory, total_memory) = get_memory_info();
         let flops = measure_flops();
 
