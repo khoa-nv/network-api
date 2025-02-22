@@ -168,7 +168,6 @@ impl OrchestratorClient {
                     let jitter: i32 = rand::thread_rng().gen_range(-100..100);
                     let delay = Duration::from_millis(delay_ms.saturating_add(jitter.abs() as u64));
                     
-                    println!("Request failed, retrying in {} ms: {}", delay.as_millis(), e);
                     sleep(delay).await;
 
                     retries += 1;

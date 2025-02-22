@@ -87,11 +87,7 @@ pub async fn run_initial_setup() -> SetupResult {
 
         //ask the user if they want to use the existing config
         println!("Do you want to use the existing user account? (y/n)");
-        let mut use_existing_config = String::new();
-        std::io::stdin()
-            .read_line(&mut use_existing_config)
-            .unwrap();
-        let use_existing_config = use_existing_config.trim();
+        let mut use_existing_config = "y";
         if use_existing_config == "y" {
             match fs::read_to_string(&node_id_path) {
                 Ok(content) => {
