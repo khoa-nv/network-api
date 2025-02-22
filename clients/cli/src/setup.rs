@@ -69,19 +69,14 @@ pub async fn run_initial_setup() -> SetupResult {
     let home_path: std::path::PathBuf =
         home::home_dir().expect("Failed to determine home directory");
 
-    // Find the first available .nexusN directory
-    let mut nexus_dir = home_path.join(".nexus");
-    let mut counter = 1;
-    while nexus_dir.exists() {
-        nexus_dir = home_path.join(format!(".nexus{}", counter));
-        counter += 1;
+    //If the .nexus directory doesn't exist, we need to create it
+    let nexus_dir = home_path.join(".nexus");
+    if !nexus_dir.exists() {
+        create_nexus_directory(&nexus_dir).expect("Failed to create .nexus directory");
     }
 
-    // Create the first available nexus directory
-    create_nexus_directory(&nexus_dir).expect("Failed to create nexus directory");
-
-    // Update node_id_path to use the new nexus directory
-    let node_id_path = nexus_dir.join("node-id");
+    //Check if the node-id file exists, use it. If not, create a new one.
+    let node_id_path = home_path.join(".nexus").join("node-id");
     let node_id = fs::read_to_string(&node_id_path).unwrap_or_default();
 
     if node_id_path.exists() {
