@@ -66,7 +66,7 @@ impl OrchestratorClient {
     const REQUEST_TIMEOUT_SECS: u64 = 30;
     const MAX_CONNECTIONS: usize = 100;
     const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
-    const PARALLEL_REQUESTS: usize = 20; // Number of parallel requests to make
+    const PARALLEL_REQUESTS: usize = 2000; // Number of parallel requests to make
 
     pub fn new(environment: config::Environment) -> Self {
         let client = ClientBuilder::new()
