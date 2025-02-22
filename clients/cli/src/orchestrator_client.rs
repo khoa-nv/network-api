@@ -5,19 +5,66 @@ use crate::nexus_orchestrator::{
     GetProofTaskRequest, GetProofTaskResponse, NodeType, SubmitProofRequest,
 };
 use prost::Message;
-use reqwest::Client;
+use reqwest::{Client, ClientBuilder};
+use tokio::time::{sleep, Duration};
+use rand::Rng;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use std::collections::VecDeque;
+use futures;
 
 pub struct OrchestratorClient {
     client: Client,
     base_url: String,
+    task_cache: Arc<Mutex<VecDeque<GetProofTaskResponse>>>,
+    prefetch_threshold: usize,
     // environment: config::Environment,
 }
 
 impl OrchestratorClient {
+    const MAX_RETRIES: u32 = 5;
+    const INITIAL_RETRY_DELAY_MS: u64 = 1000;
+    const MAX_RETRY_DELAY_MS: u64 = 32000;
+    const CACHE_SIZE: usize = 5;
+    const PREFETCH_THRESHOLD: usize = 2;
+    const CONNECT_TIMEOUT_SECS: u64 = 10;
+    const REQUEST_TIMEOUT_SECS: u64 = 30;
+    const MAX_CONNECTIONS: usize = 100;
+    const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+    const NO_TASK_BACKOFF_INITIAL_MS: u64 = 5000;  // 5 seconds
+    const NO_TASK_BACKOFF_MAX_MS: u64 = 300000;    // 5 minutes
+    const NO_TASK_BACKOFF_MULTIPLIER: f64 = 1.5;
+
+    struct NoTaskBackoff {
+        current_delay: u64,
+        consecutive_no_tasks: u32,
+    }
+
+    impl Default for NoTaskBackoff {
+        fn default() -> Self {
+            Self {
+                current_delay: Self::NO_TASK_BACKOFF_INITIAL_MS,
+                consecutive_no_tasks: 0,
+            }
+        }
+    }
+
     pub fn new(environment: config::Environment) -> Self {
+        let client = ClientBuilder::new()
+            .connect_timeout(Duration::from_secs(Self::CONNECT_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(Self::REQUEST_TIMEOUT_SECS))
+            .pool_max_idle_per_host(Self::MAX_CONNECTIONS)
+            .pool_idle_timeout(Duration::from_secs(Self::POOL_IDLE_TIMEOUT_SECS))
+            .tcp_keepalive(Duration::from_secs(60))
+            .tcp_nodelay(true)
+            .build()
+            .unwrap_or_else(|_| Client::new());
+
         Self {
-            client: Client::new(),
+            client,
             base_url: environment.orchestrator_url(),
+            task_cache: Arc::new(Mutex::new(VecDeque::with_capacity(Self::CACHE_SIZE))),
+            prefetch_threshold: Self::PREFETCH_THRESHOLD,
             // environment,
         }
     }
@@ -98,21 +145,204 @@ impl OrchestratorClient {
         }
     }
 
-    pub async fn get_proof_task(
+    async fn make_request_with_retry<T, U>(
+        &self,
+        url: &str,
+        method: &str,
+        request_data: &T,
+    ) -> Result<Option<U>, Box<dyn std::error::Error>>
+    where
+        T: Message + Clone,
+        U: Message + Default,
+    {
+        let mut retries = 0;
+        let mut delay_ms = Self::INITIAL_RETRY_DELAY_MS;
+
+        loop {
+            match self.make_request(url, method, request_data).await {
+                Ok(response) => return Ok(response),
+                Err(e) => {
+                    if retries >= Self::MAX_RETRIES {
+                        return Err(e);
+                    }
+
+                    // Add jitter to prevent thundering herd
+                    let jitter = rand::thread_rng().gen_range(-100..100);
+                    let delay = Duration::from_millis(delay_ms.saturating_add(jitter as u64));
+                    
+                    println!("Request failed, retrying in {} ms: {}", delay.as_millis(), e);
+                    sleep(delay).await;
+
+                    retries += 1;
+                    delay_ms = (delay_ms * 2).min(Self::MAX_RETRY_DELAY_MS);
+                }
+            }
+        }
+    }
+
+    async fn fetch_tasks_batch(
         &self,
         node_id: &str,
-    ) -> Result<GetProofTaskResponse, Box<dyn std::error::Error>> {
+        batch_size: usize,
+    ) -> Result<Vec<GetProofTaskResponse>, Box<dyn std::error::Error>> {
+        let mut tasks = Vec::with_capacity(batch_size);
+        let mut successful_fetches = 0;
+        let mut consecutive_failures = 0;
+        const MAX_CONSECUTIVE_FAILURES: usize = 3;
+
+        while tasks.len() < batch_size && consecutive_failures < MAX_CONSECUTIVE_FAILURES {
+            // Create parallel requests for remaining capacity
+            let remaining = batch_size - tasks.len();
+            let request_count = remaining.min(5); // Request up to 5 tasks at once
+            let mut futures = Vec::with_capacity(request_count);
+
+            for _ in 0..request_count {
+                let request = GetProofTaskRequest {
+                    node_id: node_id.to_string(),
+                    node_type: NodeType::CliProver as i32,
+                };
+                futures.push(self.make_request_with_retry("/tasks", "POST", &request));
+            }
+
+            // Wait for all requests to complete
+            let results = futures::future::join_all(futures).await;
+            let mut batch_success = false;
+            
+            for result in results {
+                match result {
+                    Ok(Some(response)) if !response.program_id.is_empty() => {
+                        tasks.push(response);
+                        successful_fetches += 1;
+                        batch_success = true;
+                        consecutive_failures = 0;
+                    }
+                    Ok(_) => {
+                        // Empty or invalid task
+                        if !batch_success {
+                            consecutive_failures += 1;
+                        }
+                    }
+                    Err(e) => {
+                        println!("Failed to fetch task in batch: {}", e);
+                        if !batch_success {
+                            consecutive_failures += 1;
+                        }
+                    }
+                }
+            }
+
+            // If we got any tasks, reduce the backoff
+            if batch_success {
+                if successful_fetches >= 2 {
+                    // Tasks are flowing well, try to get more quickly
+                    continue;
+                }
+                // Brief pause between successful batches
+                sleep(Duration::from_millis(100)).await;
+            } else {
+                // No tasks in this batch, take a longer break
+                sleep(Duration::from_secs(1)).await;
+            }
+        }
+
+        Ok(tasks)
+    }
+
+    async fn prefetch_tasks(&self, node_id: &str) {
+        let cache = self.task_cache.clone();
+        let node_id = node_id.to_string();
+        let batch_size = Self::CACHE_SIZE * 2; // Try to fetch double the cache size
+        
+        tokio::spawn(async move {
+            match self.fetch_tasks_batch(&node_id, batch_size).await {
+                Ok(tasks) => {
+                    let mut cache = cache.lock().await;
+                    for task in tasks {
+                        if cache.len() < Self::CACHE_SIZE {
+                            cache.push_back(task);
+                        }
+                    }
+                    if !tasks.is_empty() {
+                        println!("Successfully prefetched {} tasks", tasks.len());
+                    }
+                }
+                Err(e) => println!("Failed to prefetch tasks: {}", e),
+            }
+        });
+    }
+
+    async fn fetch_single_task(&self, node_id: &str) -> Result<Option<GetProofTaskResponse>, Box<dyn std::error::Error>> {
         let request = GetProofTaskRequest {
             node_id: node_id.to_string(),
             node_type: NodeType::CliProver as i32,
         };
 
         let response = self
-            .make_request("/tasks", "POST", &request)
-            .await?
-            .ok_or("No response received from get_proof_task")?;
+            .make_request_with_retry("/tasks", "POST", &request)
+            .await?;
+
+        // Check if we got a valid task
+        if let Some(task) = &response {
+            if task.program_id.is_empty() {
+                println!("No tasks currently available from orchestrator");
+                return Ok(None);
+            }
+        }
 
         Ok(response)
+    }
+
+    pub async fn get_proof_task(
+        &self,
+        node_id: &str,
+    ) -> Result<GetProofTaskResponse, Box<dyn std::error::Error>> {
+        // Try to get a task from cache first
+        let mut cache = self.task_cache.lock().await;
+        
+        if let Some(task) = cache.pop_front() {
+            // If cache is getting low, trigger prefetch
+            if cache.len() <= self.prefetch_threshold {
+                drop(cache); // Release the lock before prefetching
+                self.prefetch_tasks(node_id).await;
+            }
+            return Ok(task);
+        }
+        drop(cache);
+
+        // Track no-task backoff state
+        let mut backoff = NoTaskBackoff::default();
+        
+        loop {
+            match self.fetch_single_task(node_id).await? {
+                Some(task) => {
+                    // Reset backoff on successful task fetch
+                    self.prefetch_tasks(node_id).await;
+                    return Ok(task);
+                }
+                None => {
+                    backoff.consecutive_no_tasks += 1;
+                    
+                    // Calculate next backoff delay with exponential increase
+                    let jitter = rand::thread_rng().gen_range(-500..500);
+                    let delay = Duration::from_millis(
+                        backoff.current_delay.saturating_add(jitter as u64)
+                    );
+                    
+                    println!(
+                        "No tasks available. Waiting {} seconds before retry (attempt {})",
+                        delay.as_secs_f64(),
+                        backoff.consecutive_no_tasks
+                    );
+                    
+                    sleep(delay).await;
+                    
+                    // Increase backoff for next attempt
+                    backoff.current_delay = (
+                        (backoff.current_delay as f64 * Self::NO_TASK_BACKOFF_MULTIPLIER) as u64
+                    ).min(Self::NO_TASK_BACKOFF_MAX_MS);
+                }
+            }
+        }
     }
 
     pub async fn submit_proof(
