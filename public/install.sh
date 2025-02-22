@@ -72,13 +72,23 @@ if [ -d "$REPO_PATH" ]; then
   echo "$REPO_PATH exists. Updating."
   (
     cd "$REPO_PATH" || exit
+    # Save any local changes
     git stash
-    git fetch --tags
+    # Fetch all updates and tags
+    git fetch --all --tags --prune
+    # Get the latest tag
+    LATEST_TAG=$(git describe --tags "$(git rev-list --tags --max-count=1)")
+    # Checkout the latest tag
+    git checkout -f "$LATEST_TAG"
   )
 else
   (
     cd "$NEXUS_HOME" || exit
     git clone https://github.com/nexus-xyz/network-api
+    cd network-api || exit
+    # Get and checkout the latest tag
+    LATEST_TAG=$(git describe --tags "$(git rev-list --tags --max-count=1)")
+    git checkout -f "$LATEST_TAG"
   )
 fi
 

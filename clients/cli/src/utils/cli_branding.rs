@@ -1,16 +1,23 @@
 use colored::Colorize;
 
+const LOGO_NAME: &str = r#"
+███╗   ██╗███████╗██╗  ██╗██╗   ██╗███████╗
+████╗  ██║██╔════╝╚██╗██╔╝██║   ██║██╔════╝
+██╔██╗ ██║█████╗   ╚███╔╝ ██║   ██║███████╗
+██║╚██╗██║██╔══╝   ██╔██╗ ██║   ██║╚════██║
+██║ ╚████║███████╗██╔╝ ██╗╚██████╔╝███████║
+╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝
+"#;
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub fn print_banner() {
     println!("{}", LOGO_NAME.bright_cyan());
-    println!(
-        "{} {} {}\n",
-        "Welcome to the".bright_white(),
-        "Nexus Network CLI".bright_cyan().bold(),
-        "v0.5.5".bright_white()
-    );
-    println!(
-        "{}",
-        "The Nexus network is a massively-parallelized proof network for executing and proving the \x1b]8;;https://docs.nexus.org\x1b\\Nexus zkVM\x1b]8;;\x1b\\.\n\n"
-            .bright_white()
-    );
+    println!("Nexus Network CLI v{}\n", VERSION);
+    println!("Welcome to the Nexus Network! This CLI allows you to contribute to the network by running a prover node.");
+    println!("For more information, visit: https://nexus.xyz/network\n");
+}
+
+pub fn print_logo() {
+    println!("{}", LOGO_NAME.bright_cyan());
 }
