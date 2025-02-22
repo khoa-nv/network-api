@@ -12,8 +12,9 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::VecDeque;
 use futures;
-use std::error::Error as StdError;
-use anyhow::{Result, Error};
+
+// Define our own Result type
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 // Move NoTaskBackoff outside impl block
 struct NoTaskBackoff {
@@ -170,8 +171,8 @@ impl OrchestratorClient {
                         return Err(e);
                     }
 
-                    let jitter = rand::thread_rng().gen_range(-100..100);
-                    let delay = Duration::from_millis(delay_ms.saturating_add(jitter.unsigned_abs() as u64));
+                    let jitter: i32 = rand::thread_rng().gen_range(-100..100);
+                    let delay = Duration::from_millis(delay_ms.saturating_add((jitter.abs() as u64)));
                     
                     println!("Request failed, retrying in {} ms: {}", delay.as_millis(), e);
                     sleep(delay).await;
@@ -331,9 +332,9 @@ impl OrchestratorClient {
                 None => {
                     backoff.consecutive_no_tasks += 1;
                     
-                    let jitter = rand::thread_rng().gen_range(-500i32..500i32) as i64;
+                    let jitter: i32 = rand::thread_rng().gen_range(-500..500);
                     let delay = Duration::from_millis(
-                        backoff.current_delay.saturating_add(jitter.unsigned_abs() as u64)
+                        backoff.current_delay.saturating_add((jitter.abs() as u64))
                     );
                     
                     println!(
