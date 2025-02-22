@@ -9,9 +9,9 @@ use reqwest::{Client, ClientBuilder};
 use tokio::time::{sleep, Duration};
 use rand::Rng;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, broadcast};
 use std::collections::VecDeque;
-use futures;
+use futures::{self, future::select_ok, FutureExt};
 use std::error::Error;
 
 // Define our own Error type
@@ -66,6 +66,7 @@ impl OrchestratorClient {
     const REQUEST_TIMEOUT_SECS: u64 = 30;
     const MAX_CONNECTIONS: usize = 100;
     const POOL_IDLE_TIMEOUT_SECS: u64 = 90;
+    const PARALLEL_REQUESTS: usize = 20; // Number of parallel requests to make
 
     pub fn new(environment: config::Environment) -> Self {
         let client = ClientBuilder::new()
@@ -305,6 +306,48 @@ impl OrchestratorClient {
         Ok(response)
     }
 
+    async fn fetch_parallel_tasks(
+        &self,
+        node_id: &str,
+    ) -> Result<GetProofTaskResponse> {
+        let (cancel_tx, _) = broadcast::channel(1);
+        let mut futures = Vec::with_capacity(Self::PARALLEL_REQUESTS);
+
+        for _ in 0..Self::PARALLEL_REQUESTS {
+            let request = GetProofTaskRequest {
+                node_id: node_id.to_string(),
+                node_type: NodeType::CliProver as i32,
+            };
+            let cancel_rx = cancel_tx.subscribe();
+            let client = self.clone();
+
+            let future = async move {
+                tokio::select! {
+                    result = client.fetch_single_task(&request.node_id) => {
+                        match result? {
+                            Some(task) if !task.program_id.is_empty() => Ok(task),
+                            _ => Err(OrchestratorError("No task available".to_string())),
+                        }
+                    }
+                    _ = cancel_rx.recv() => {
+                        Err(OrchestratorError("Request cancelled".to_string()))
+                    }
+                }
+            }.boxed();
+
+            futures.push(future);
+        }
+
+        let result = select_ok(futures).await;
+        // Cancel all other requests
+        let _ = cancel_tx.send(());
+
+        match result {
+            Ok((task, _remaining)) => Ok(task),
+            Err(e) => Err(OrchestratorError(format!("All parallel requests failed: {}", e)))
+        }
+    }
+
     pub async fn get_proof_task(
         &self,
         node_id: &str,
@@ -323,12 +366,12 @@ impl OrchestratorClient {
         let mut backoff = NoTaskBackoff::default();
         
         loop {
-            match self.fetch_single_task(node_id).await? {
-                Some(task) => {
+            match self.fetch_parallel_tasks(node_id).await {
+                Ok(task) => {
                     self.prefetch_tasks(node_id).await;
                     return Ok(task);
                 }
-                None => {
+                Err(_) => {
                     backoff.consecutive_no_tasks += 1;
                     
                     let jitter: i32 = rand::thread_rng().gen_range(-500..500);
