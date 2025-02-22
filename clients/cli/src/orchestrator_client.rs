@@ -12,9 +12,21 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::collections::VecDeque;
 use futures;
+use std::error::Error;
 
-// Define our own Result type
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
+// Define our own Error type
+#[derive(Debug)]
+pub struct OrchestratorError(String);
+
+impl std::fmt::Display for OrchestratorError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl Error for OrchestratorError {}
+
+type Result<T> = std::result::Result<T, OrchestratorError>;
 
 // Move NoTaskBackoff outside impl block
 struct NoTaskBackoff {
@@ -87,67 +99,48 @@ impl OrchestratorClient {
         let request_bytes = request_data.encode_to_vec();
         let url = format!("{}{}", self.base_url, url);
 
-        let friendly_connection_error =
-            "[CONNECTION] Unable to reach server. The service might be temporarily unavailable."
-                .to_string();
-        let friendly_messages = match method {
-            "POST" => match self
-                .client
-                .post(&url)
+        let response = match method {
+            "POST" => self.client.post(&url)
                 .header("Content-Type", "application/octet-stream")
                 .body(request_bytes)
                 .send()
                 .await
-            {
-                Ok(resp) => resp,
-                Err(_) => return Err(friendly_connection_error.into()),
-            },
-            "GET" => match self.client.get(&url).send().await {
-                Ok(resp) => resp,
-                Err(_) => return Err(friendly_connection_error.into()),
-            },
-            _ => return Err("[METHOD] Unsupported HTTP method".into()),
+                .map_err(|e| OrchestratorError(format!("Request failed: {}", e)))?,
+            "GET" => self.client.get(&url)
+                .send()
+                .await
+                .map_err(|e| OrchestratorError(format!("Request failed: {}", e)))?,
+            _ => return Err(OrchestratorError("Unsupported HTTP method".to_string())),
         };
 
-        if !friendly_messages.status().is_success() {
-            let status = friendly_messages.status();
-            let error_text = friendly_messages.text().await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await
+                .unwrap_or_else(|_| "Unknown error".to_string());
 
-            // Clean up error text by removing HTML
-            let clean_error = if error_text.contains("<html>") {
-                format!("HTTP {}", status.as_u16())
-            } else {
-                error_text
+            let error_msg = match status.as_u16() {
+                400 => format!("[400] Invalid request: {}", error_text),
+                401 => format!("[401] Authentication failed: {}", error_text),
+                403 => format!("[403] Permission denied: {}", error_text),
+                404 => format!("[404] Resource not found: {}", error_text),
+                429 => format!("[429] Too many requests: {}", error_text),
+                500..=599 => format!("[{}] Server error: {}", status, error_text),
+                _ => format!("[{}] Unexpected error: {}", status, error_text),
             };
 
-            let friendly_message = match status.as_u16() {
-                400 => "[400] Invalid request".to_string(),
-                401 => "[401] Authentication failed. Please check your credentials.".to_string(),
-                403 => "[403] You don't have permission to perform this action.".to_string(),
-                404 => "[404] The requested resource was not found.".to_string(),
-                408 => "[408] The server timed out waiting for your request. Please try again.".to_string(),
-                429 => "[429] Too many requests. Please try again later.".to_string(),
-                502 => "[502] Unable to reach the server. Please try again later.".to_string(),
-                504 => "[504] Gateway Timeout: The server took too long to respond. Please try again later.".to_string(),
-                500..=599 => format!("[{}] A server error occurred. Our team has been notified. Please try again later.", status),
-                _ => format!("[{}] Unexpected error: {}", status, clean_error),
-            };
-
-            return Err(friendly_message.into());
+            return Err(OrchestratorError(error_msg));
         }
 
-        let response_bytes = friendly_messages.bytes().await?;
+        let response_bytes = response.bytes().await
+            .map_err(|e| OrchestratorError(format!("Failed to read response: {}", e)))?;
+
         if response_bytes.is_empty() {
             return Ok(None);
         }
 
-        match U::decode(response_bytes) {
-            Ok(msg) => Ok(Some(msg)),
-            Err(_e) => {
-                // println!("Failed to decode response: {:?}", e);
-                Ok(None)
-            }
-        }
+        U::decode(response_bytes)
+            .map(Some)
+            .map_err(|e| OrchestratorError(format!("Failed to decode response: {}", e)))
     }
 
     async fn make_request_with_retry<T, U>(
@@ -199,18 +192,22 @@ impl OrchestratorClient {
             let request_count = remaining.min(5);
             let mut futures = Vec::with_capacity(request_count);
 
-            // Create and process requests one at a time to avoid lifetime issues
+            // Create futures for each request
             for _ in 0..request_count {
                 let request = GetProofTaskRequest {
                     node_id: node_id.to_string(),
                     node_type: NodeType::CliProver as i32,
                 };
                 
-                let future = self.make_request_with_retry::<GetProofTaskRequest, GetProofTaskResponse>(
-                    "/tasks", 
-                    "POST", 
-                    &request
-                );
+                // Clone the request for the future
+                let request_clone = request.clone();
+                let future = async move {
+                    self.make_request_with_retry::<GetProofTaskRequest, GetProofTaskResponse>(
+                        "/tasks", 
+                        "POST", 
+                        &request_clone
+                    ).await
+                };
                 futures.push(future);
             }
 

@@ -11,9 +11,9 @@ pub fn measure_flops() -> f64 {
         sum += (i as f64).sqrt();
     }
     
-    let _duration = start.elapsed(); // Prefix with underscore since we're not using it yet
+    let duration = start.elapsed();
     
-    // Return a placeholder FLOPS value
-    // In a real implementation, you would calculate this based on the duration
-    1_000_000.0
+    // Calculate actual FLOPS based on operations performed
+    let operations = 1_000_000.0; // One sqrt operation per iteration
+    operations / duration.as_secs_f64()
 }
